@@ -1,1 +1,1 @@
-# xinhua-dict
+# 小天才电话手表rtos智汇字典服务端
