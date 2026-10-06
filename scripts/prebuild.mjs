@@ -1,22 +1,28 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-// 国际站配置
 const API_KEY = process.env.ZAI_API_KEY;
-const BASE = 'https://api.z.ai/api/paas/v4';
+const BASE = 'https://api.z.ai/api/paas/v4/chat/completions';
 const OUT = 'dict';
+
 await fs.mkdir(OUT, { recursive: true });
 
 const words = JSON.parse(await fs.readFile('scripts/common.json', 'utf8'));
 
-const prompt = w => `为汉字「${w}」生成新华字典词条，输出严格JSON（含word/pinyin/radical/strokes/structure/meaning/phrases/related/etymology）。只输出JSON，不要markdown。`;
+const prompt = w => `你是新华字典编纂助手。请为汉字「${w}」生成规范词条。
+严格输出以下JSON格式，不要任何Markdown代码块，不要任何解释性文字：
+{"word": "${w}","pinyin": "带声调拼音","radical": "部首","strokes": 笔画数(必须是数字),"structure": "独体/上下/左右/包围/半包围/品字形","meaning": [{"pos":"词性","def":"释义","examples":["例句"]}],"phrases": ["组词"],"related": ["关联字"],"etymology": "50字以内字源"}`;
 
 for (const w of words) {
   const file = path.join(OUT, `${w}.json`);
-  try { await fs.access(file); continue; } catch {} // 已生成则跳过
+  try { 
+    await fs.access(file); 
+    console.log(`✓ ${w} 已存在，跳过`);
+    continue; 
+  } catch {}
 
   try {
-    const r = await fetch(`${BASE}/chat/completions`, {
+    const r = await fetch(BASE, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -24,31 +30,38 @@ for (const w of words) {
       },
       body: JSON.stringify({
         model: 'glm-4.7-flash',
-        messages: [{ role: 'user', content: prompt(w) }],
-        temperature: 0.3
+        messages: [
+          { role: 'system', content: '你是一个严格输出JSON的API，只输出JSON对象。' },
+          { role: 'user', content: prompt(w) }
+        ],
+        temperature: 0.1,
+        response_format: { type: "json_object" }
       })
     });
+
+    if (r.status === 429) {
+      console.log(`⚠️ ${w} 遇到429限流，等待5秒后重试...`);
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      // 简单重试一次
+      continue;
+    }
+
     const j = await r.json();
-    const text = j.choices[0].message.content;
-    const m = text.match(/\{[\s\S]*\}/);
-    const data = JSON.parse(m[0]);
-    data._source = 'prebuild';
-    data._ts = Math.floor(Date.now() / 1000);
+    if (j.error) throw new Error(j.error.message);
+
+    let text = j.choices?.[0]?.message?.content || '';
+    text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+    
+    const data = JSON.parse(text);
     await fs.writeFile(file, JSON.stringify(data, null, 2));
-    console.log('✓', w);
+    console.log(`✅ ${w} 生成成功`);
+
   } catch (e) {
-    console.warn('✗', w, e.message);
+    console.error(`❌ ${w} 生成失败: ${e.message}`);
   }
-  // 智谱免费层并发限制为 1，必须间隔 1.2 秒
-  await new Promise(r => setTimeout(r, 1200));
+
+  // ⭐️ 核心防封禁：每个字之间强制休息 1.5 秒
+  await new Promise(resolve => setTimeout(resolve, 1500));
 }
 
-// 生成搜索索引
-const files = (await fs.readdir(OUT)).filter(f => f.endsWith('.json'));
-const index = [];
-for (const f of files) {
-  const d = JSON.parse(await fs.readFile(path.join(OUT, f), 'utf8'));
-  index.push({ word: d.word, pinyin: d.pinyin, radical: d.radical });
-}
-await fs.writeFile('index.json', JSON.stringify(index));
-console.log('索引条目:', index.length);
+console.log('🎉 预生成任务全部完成！');
